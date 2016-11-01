@@ -1,0 +1,275 @@
+From 7cce82982c92098c2b6508244871654b3002e0bb Mon Sep 17 00:00:00 2001
+From: Pavel Glushchak <pglushchak@virtuozzo.com>
+Date: Mon, 26 Sep 2016 16:37:15 +0300
+Subject: [PATCH 2/3] determine grub version and cfg path by os profile
+
+Currently fuel-agent installs grub2 config in invalid
+location for rhel7. Thus provisioned node cannot boot.
+This change makes grub2 config path configurable based
+on OS type and version.
+
+Closes-Bug: #1627794
+Change-Id: Ide299fd7b5045fa6383eb5e12f2b9597431349e8
+Signed-off-by: Pavel Glushchak <pglushchak@virtuozzo.com>
+---
+ fuel_agent/drivers/nailgun.py       | 15 +++++++++------
+ fuel_agent/manager.py               |  4 ++--
+ fuel_agent/objects/bootloader.py    |  6 ++++--
+ fuel_agent/tests/test_grub_utils.py | 37 +++++--------------------------------
+ fuel_agent/tests/test_manager.py    |  2 ++
+ fuel_agent/tests/test_nailgun.py    | 17 ++++++++++++++---
+ fuel_agent/utils/grub.py            | 13 +++----------
+ 7 files changed, 39 insertions(+), 55 deletions(-)
+
+diff --git a/fuel_agent/drivers/nailgun.py b/fuel_agent/drivers/nailgun.py
+index f70d165..0633f13 100644
+--- a/fuel_agent/drivers/nailgun.py
++++ b/fuel_agent/drivers/nailgun.py
+@@ -627,12 +627,15 @@ class Nailgun(BaseDataDriver):
+                   self.data['ks_meta']['pm_data']['kernel_params'])
+         grub.append_kernel_params(
+             self.data['ks_meta']['pm_data']['kernel_params'])
+-        if 'centos' in self.data['profile'].lower() and \
+-                not self.data['ks_meta'].get('kernel_lt'):
+-            LOG.debug('Prefered kernel version is 2.6')
+-            grub.kernel_regexp = r'^vmlinuz-2\.6.*'
+-            grub.initrd_regexp = r'^initramfs-2\.6.*'
+-        grub.version = 1 if self.have_grub1_by_default else 2
++        if isinstance(self.operating_system, objects.Centos):
++            if self.operating_system.major == 7:
++                grub.cfg_file = '/boot/grub2/grub.cfg'
++            elif self.operating_system.major == 6:
++                grub.version = 1
++                if not self.data['ks_meta'].get('kernel_lt'):
++                    LOG.debug('Preferred kernel version is 2.6')
++                    grub.kernel_regexp = r'^vmlinuz-2\.6.*'
++                    grub.initrd_regexp = r'^initramfs-2\.6.*'
+         LOG.debug('Grub version is {0}'.format(grub.version))
+         return grub
+ 
+diff --git a/fuel_agent/manager.py b/fuel_agent/manager.py
+index 3a2cad1..2031a66 100644
+--- a/fuel_agent/manager.py
++++ b/fuel_agent/manager.py
+@@ -908,8 +908,8 @@ class Manager(object):
+         else:
+             # TODO(kozhukalov): implement which kernel to use by default
+             # Currently only grub1_cfg accepts kernel and initrd parameters.
+-            gu.grub2_cfg(kernel_params=grub.kernel_params, chroot=chroot,
+-                         grub_timeout=CONF.grub_timeout)
++            gu.grub2_cfg(grub.cfg_file, kernel_params=grub.kernel_params,
++                         chroot=chroot, grub_timeout=CONF.grub_timeout)
+             gu.grub2_install(install_devices, chroot=chroot)
+ 
+         if CONF.fix_udev_net_rules:
+diff --git a/fuel_agent/objects/bootloader.py b/fuel_agent/objects/bootloader.py
+index 62a09c0..8715f95 100644
+--- a/fuel_agent/objects/bootloader.py
++++ b/fuel_agent/objects/bootloader.py
+@@ -14,15 +14,17 @@
+ 
+ 
+ class Grub(object):
+-    def __init__(self, version=None, kernel_params='',
++    def __init__(self, version=2, kernel_params='',
+                  kernel_name=None, kernel_regexp=None,
+-                 initrd_name=None, initrd_regexp=None):
++                 initrd_name=None, initrd_regexp=None,
++                 cfg_file='/boot/grub/grub.cfg'):
+         self.version = version
+         self.kernel_params = kernel_params
+         self.kernel_name = kernel_name
+         self.initrd_name = initrd_name
+         self.kernel_regexp = kernel_regexp
+         self.initrd_regexp = initrd_regexp
++        self.cfg_file = cfg_file
+ 
+     def append_kernel_params(self, *kernel_params):
+         for kp in kernel_params:
+diff --git a/fuel_agent/tests/test_grub_utils.py b/fuel_agent/tests/test_grub_utils.py
+index f457dea..9962791 100644
+--- a/fuel_agent/tests/test_grub_utils.py
++++ b/fuel_agent/tests/test_grub_utils.py
+@@ -24,32 +24,6 @@ from fuel_agent.utils import grub as gu
+ 
+ class TestGrubUtils(unittest2.TestCase):
+ 
+-    @mock.patch('fuel_agent.utils.grub.os.path.isdir')
+-    def test_guess_grub2_conf(self, mock_isdir):
+-        side_effect_values = {
+-            '/target/boot/grub': True,
+-            '/target/boot/grub2': False
+-        }
+-
+-        def side_effect(key):
+-            return side_effect_values[key]
+-
+-        mock_isdir.side_effect = side_effect
+-        self.assertEqual(gu.guess_grub2_conf('/target'),
+-                         '/boot/grub/grub.cfg')
+-
+-        side_effect_values = {
+-            '/target/boot/grub': False,
+-            '/target/boot/grub2': True
+-        }
+-        self.assertEqual(gu.guess_grub2_conf('/target'),
+-                         '/boot/grub2/grub.cfg')
+-
+-    @mock.patch('fuel_agent.utils.grub.os.path.isdir', return_value=False)
+-    def test_guess_grub2_conf_not_found(self, mock_isdir):
+-        self.assertRaises(errors.GrubUtilsError, gu.guess_grub2_conf,
+-                          '/target')
+-
+     @mock.patch('fuel_agent.utils.grub.os.path.isfile')
+     def test_guess_grub2_default(self, mock_isfile):
+         side_effect_values = {
+@@ -447,14 +421,13 @@ title Default (kernel-version-set)
+         gu.grub2_install(['/dev/foo', '/dev/bar'], chroot='/target')
+         self.assertEqual(mock_exec.call_args_list, expected_calls)
+ 
+-    @mock.patch('fuel_agent.utils.grub.guess_grub2_conf')
+     @mock.patch('fuel_agent.utils.grub.guess_grub2_mkconfig')
+     @mock.patch('fuel_agent.utils.grub.utils.execute')
+     @mock.patch('fuel_agent.utils.grub.guess_grub2_default')
+-    def test_grub2_cfg(self, mock_def, mock_exec, mock_mkconfig, mock_conf):
++    def test_grub2_cfg(self, mock_def, mock_exec, mock_mkconfig):
+         mock_def.return_value = '/etc/default/grub'
+         mock_mkconfig.return_value = '/sbin/grub-mkconfig'
+-        mock_conf.return_value = '/boot/grub/grub.cfg'
++        cfg_file = '/boot/grub/grub.cfg'
+         orig_content = """foo
+ GRUB_HIDDEN_TIMEOUT=5
+ GRUB_HIDDEN_TIMEOUT_QUIET=true
+@@ -474,8 +447,8 @@ GRUB_RECORDFAIL_TIMEOUT=10
+             mock_open.return_value = mock.MagicMock(spec=io.IOBase)
+             handle = mock_open.return_value.__enter__.return_value
+             handle.__iter__.return_value = StringIO(orig_content)
+-            gu.grub2_cfg(kernel_params='kernel-params-new', chroot='/target',
+-                         grub_timeout=10)
++            gu.grub2_cfg(cfg_file, kernel_params='kernel-params-new',
++                         chroot='/target', grub_timeout=10)
+ 
+             self.assertEqual(
+                 mock_open.call_args_list,
+@@ -486,5 +459,5 @@ GRUB_RECORDFAIL_TIMEOUT=10
+             handle.write.assert_called_once_with(new_content)
+         mock_exec.assert_called_once_with('chroot', '/target',
+                                           '/sbin/grub-mkconfig',
+-                                          '-o', '/boot/grub/grub.cfg',
++                                          '-o', cfg_file,
+                                           run_as_root=True)
+diff --git a/fuel_agent/tests/test_manager.py b/fuel_agent/tests/test_manager.py
+index 5e84fe8..c4c09a6 100644
+--- a/fuel_agent/tests/test_manager.py
++++ b/fuel_agent/tests/test_manager.py
+@@ -156,6 +156,7 @@ class TestManager(unittest2.TestCase):
+         mock_grub.kernel_name = 'fake_kernel_name'
+         mock_grub.initrd_name = 'fake_initrd_name'
+         mock_grub.kernel_params = 'fake_kernel_params'
++        mock_grub.cfg_file = '/boot/grub/grub.cfg'
+         self.mgr.driver._grub = mock_grub
+         self.mgr.do_bootloader()
+         mock_grub.append_kernel_params.assert_called_once_with(
+@@ -248,6 +249,7 @@ class TestManager(unittest2.TestCase):
+         mock_gu.guess_grub_version.assert_called_once_with(
+             chroot='/tmp/target')
+         mock_gu.grub2_cfg.assert_called_once_with(
++            '/boot/grub/grub.cfg',
+             kernel_params=' console=ttyS0,9600 console=tty0 rootdelay=90 '
+                           'nomodeset root=UUID=fake_UUID ',
+             chroot='/tmp/target', grub_timeout=10)
+diff --git a/fuel_agent/tests/test_nailgun.py b/fuel_agent/tests/test_nailgun.py
+index dddaf48..0e8e04d 100644
+--- a/fuel_agent/tests/test_nailgun.py
++++ b/fuel_agent/tests/test_nailgun.py
+@@ -1709,9 +1709,10 @@ class TestNailgunMockedMeta(unittest2.TestCase):
+                          ' ' + data['ks_meta']['pm_data']['kernel_params'])
+         self.assertEqual(drv.grub.kernel_regexp, r'^vmlinuz-2\.6.*')
+         self.assertEqual(drv.grub.initrd_regexp, r'^initramfs-2\.6.*')
+-        self.assertEqual(1, drv.grub.version)
+         self.assertIsNone(drv.grub.kernel_name)
+         self.assertIsNone(drv.grub.initrd_name)
++        self.assertEqual(drv.grub.version, 1)
++        self.assertEqual(drv.grub.cfg_file, '/boot/grub/grub.cfg')
+ 
+     def test_grub_centos_lt(self, mock_lbd, mock_image_meta):
+         data = copy.deepcopy(PROVISION_SAMPLE_DATA)
+@@ -1723,9 +1724,10 @@ class TestNailgunMockedMeta(unittest2.TestCase):
+                          ' ' + data['ks_meta']['pm_data']['kernel_params'])
+         self.assertIsNone(drv.grub.kernel_regexp)
+         self.assertIsNone(drv.grub.initrd_regexp)
+-        self.assertEqual(1, drv.grub.version)
+         self.assertIsNone(drv.grub.kernel_name)
+         self.assertIsNone(drv.grub.initrd_name)
++        self.assertEqual(drv.grub.version, 1)
++        self.assertEqual(drv.grub.cfg_file, '/boot/grub/grub.cfg')
+ 
+     def test_grub_ubuntu(self, mock_lbd, mock_image_meta):
+         data = copy.deepcopy(PROVISION_SAMPLE_DATA)
+@@ -1735,11 +1737,20 @@ class TestNailgunMockedMeta(unittest2.TestCase):
+         drv = nailgun.Nailgun(data)
+         self.assertEqual(drv.grub.kernel_params,
+                          ' ' + data['ks_meta']['pm_data']['kernel_params'])
+-        self.assertEqual(2, drv.grub.version)
+         self.assertIsNone(drv.grub.kernel_regexp)
+         self.assertIsNone(drv.grub.initrd_regexp)
+         self.assertIsNone(drv.grub.kernel_name)
+         self.assertIsNone(drv.grub.initrd_name)
++        self.assertEqual(drv.grub.version, 2)
++        self.assertEqual(drv.grub.cfg_file, '/boot/grub/grub.cfg')
++
++    def test_grub_centos_7(self, mock_lbd, mock_image_meta):
++        data = copy.deepcopy(PROVISION_SAMPLE_DATA)
++        data['profile'] = 'centos7-x86_64'
++        mock_lbd.return_value = LIST_BLOCK_DEVICES_SAMPLE
++        drv = nailgun.Nailgun(data)
++        self.assertEqual(drv.grub.version, 2)
++        self.assertEqual(drv.grub.cfg_file, '/boot/grub2/grub.cfg')
+ 
+     def test_boot_partition_ok_single_disk(self, mock_lbd, mock_image_meta):
+         data = copy.deepcopy(PROVISION_SAMPLE_DATA)
+diff --git a/fuel_agent/utils/grub.py b/fuel_agent/utils/grub.py
+index f6f3d0f..758da7b 100644
+--- a/fuel_agent/utils/grub.py
++++ b/fuel_agent/utils/grub.py
+@@ -26,18 +26,11 @@ from fuel_agent.utils import utils
+ LOG = logging.getLogger(__name__)
+ 
+ 
+-def guess_grub2_conf(chroot=''):
+-    for filename in ('/boot/grub/grub.cfg', '/boot/grub2/grub.cfg'):
+-        if os.path.isdir(os.path.dirname(chroot + filename)):
+-            return filename
+-    raise errors.GrubUtilsError('grub2 config file not found')
+-
+-
+ def guess_grub2_default(chroot=''):
+     for filename in ('/etc/default/grub', '/etc/sysconfig/grub'):
+         if os.path.isfile(chroot + filename):
+             return filename
+-    raise errors.GrubUtilsError('grub2 defaul config file not found')
++    raise errors.GrubUtilsError('grub2 default config file not found')
+ 
+ 
+ def guess_grub2_mkconfig(chroot=''):
+@@ -227,7 +220,7 @@ def grub2_install(install_devices, chroot=''):
+         utils.execute(*cmd, run_as_root=True, check_exit_code=[0])
+ 
+ 
+-def grub2_cfg(kernel_params='', chroot='', grub_timeout=10):
++def grub2_cfg(cfg_file, kernel_params='', chroot='', grub_timeout=10):
+     grub_defaults = chroot + guess_grub2_default(chroot=chroot)
+     rekerparams = re.compile(r'^.*GRUB_CMDLINE_LINUX=.*')
+     retimeout = re.compile(r'^.*GRUB_TIMEOUT=.*')
+@@ -248,7 +241,7 @@ def grub2_cfg(kernel_params='', chroot='', grub_timeout=10):
+                    format(grub_timeout=grub_timeout)
+     with open(grub_defaults, 'wt', encoding='utf-8') as f:
+         f.write(six.text_type(new_content))
+-    cmd = [guess_grub2_mkconfig(chroot), '-o', guess_grub2_conf(chroot)]
++    cmd = [guess_grub2_mkconfig(chroot), '-o', cfg_file]
+     if chroot:
+         cmd[:0] = ['chroot', chroot]
+     utils.execute(*cmd, run_as_root=True)
+-- 
+2.7.4
+

@@ -1,0 +1,34 @@
+From b0e444e79b4eeff3a32ea0c6b7363791cae263f1 Mon Sep 17 00:00:00 2001
+From: Pavel Glushchak <pglushchak@virtuozzo.com>
+Date: Thu, 29 Sep 2016 11:53:04 +0300
+Subject: [PATCH 3/3] detect vz and redhat is os profile as centos based
+
+Change-Id: I7ec7838f67aea4617990e9c0cd72e725e72abc10
+---
+ fuel_agent/drivers/nailgun.py | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/fuel_agent/drivers/nailgun.py b/fuel_agent/drivers/nailgun.py
+index 0633f13..523b62c 100644
+--- a/fuel_agent/drivers/nailgun.py
++++ b/fuel_agent/drivers/nailgun.py
+@@ -15,6 +15,7 @@
+ import itertools
+ import math
+ import os
++import re
+ 
+ from oslo_config import cfg
+ import six
+@@ -271,7 +272,7 @@ class Nailgun(BaseDataDriver):
+ 
+     def get_os_by_profile(self, profile):
+         LOG.debug('--- Getting operating system data by profile ---')
+-        if 'centos' in profile:
++        if re.search('(centos|redhat|vz)', profile):
+             os = objects.Centos(repos=None, packages=None, major=6, minor=5)
+             if '7' in profile:
+                 LOG.debug('Looks like CentOS7.0 is going to be provisioned.')
+-- 
+2.7.4
+
